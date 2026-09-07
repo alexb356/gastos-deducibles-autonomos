@@ -15,7 +15,6 @@ import os
 import io
 import csv
 import re
-import json
 from datetime import datetime, timezone
 
 from flask import Flask, request, jsonify, render_template, Response
@@ -109,6 +108,17 @@ def index():
     return render_template("index.html")
 
 
+def _detectar_delimitador(muestra):
+    """Detecta si el CSV usa coma o punto y coma como separador de columnas.
+    Los extractos bancarios españoles suelen usar ';' precisamente porque el
+    importe usa ',' como separador decimal (ej. "-45,30")."""
+    try:
+        dialecto = csv.Sniffer().sniff(muestra, delimiters=",;\t")
+        return dialecto.delimiter
+    except csv.Error:
+        return ","
+
+
 @app.route("/api/movimientos/csv", methods=["POST"])
 def subir_csv():
     if "file" not in request.files:
@@ -122,8 +132,12 @@ def subir_csv():
     except UnicodeDecodeError:
         return jsonify({"error": "no se pudo leer el CSV (codificación no soportada, usa UTF-8)"}), 400
 
+    if not contenido.strip():
+        return jsonify({"error": "el CSV está vacío"}), 400
+
     lote = datetime.now(timezone.utc).strftime("lote-%Y%m%d%H%M%S")
-    reader = csv.DictReader(io.StringIO(contenido))
+    delimitador = _detectar_delimitador(contenido[:4096])
+    reader = csv.DictReader(io.StringIO(contenido), delimiter=delimitador)
     campos = {c.lower().strip(): c for c in (reader.fieldnames or [])}
     col_fecha = next((campos[k] for k in campos if "fecha" in k), None)
     col_desc = next((campos[k] for k in campos if "concepto" in k or "descrip" in k), None)
@@ -135,7 +149,16 @@ def subir_csv():
     creados = []
     for row in reader:
         desc = (row.get(col_desc) or "").strip()
-        importe_raw = (row.get(col_importe) or "0").replace(",", ".").replace("€", "").strip()
+        importe_valor = row.get(col_importe) or ""
+        # Si el delimitador es ',' y el importe usa coma decimal (ej. "-45,30 €"),
+        # DictReader puede haber partido el valor en columnas extra (row[None]).
+        # Reconstruimos el importe original antes de normalizar.
+        extra = row.get(None)
+        if delimitador == "," and extra:
+            importe_valor = ",".join([importe_valor] + [str(x) for x in extra if x is not None])
+        importe_raw = importe_valor.replace(".", "").replace(",", ".").replace("€", "").strip() \
+            if importe_valor.count(",") == 1 and re.search(r",\d{1,2}\D*$", importe_valor) \
+            else importe_valor.replace(",", ".").replace("€", "").strip()
         try:
             importe = float(importe_raw)
         except ValueError:

@@ -39,6 +39,12 @@
 </fieldset>
 
 <script>
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = (str === null || str === undefined) ? '' : String(str);
+  return div.innerHTML;
+}
+
 let ultimoLote = null;
 
 async function subirCSV() {
@@ -67,8 +73,8 @@ async function cargarTabla() {
   const data = await r.json();
   const claseMap = {True: 'si', False: 'no', parcial: 'parcial', revisar: 'revisar'};
   document.querySelector('#tabla tbody').innerHTML = data.map(m => `<tr>
-    <td>${m.fecha||''}</td><td>${m.descripcion}</td><td>${m.importe.toFixed(2)} €</td>
-    <td class="${claseMap[m.deducible]||''}">${m.deducible}</td><td>${m.porcentaje_estimado}%</td><td>${m.norma}</td>
+    <td>${escapeHtml(m.fecha||'')}</td><td>${escapeHtml(m.descripcion)}</td><td>${m.importe.toFixed(2)} €</td>
+    <td class="${claseMap[m.deducible]||''}">${escapeHtml(m.deducible)}</td><td>${m.porcentaje_estimado}%</td><td>${escapeHtml(m.norma)}</td>
   </tr>`).join('');
 }
 

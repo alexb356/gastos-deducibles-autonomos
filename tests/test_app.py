@@ -105,3 +105,31 @@ def test_suscribir_stripe_test_mode(client):
     r = client.post("/api/suscribir")
     assert r.status_code in (200, 400)
     assert r.is_json
+
+
+def test_subir_csv_delimitador_coma_con_decimales_coma(client):
+    """Bug encontrado en revisión: extractos bancarios con delimitador ',' y
+    decimales también en coma (ej. '-45,30 €') se truncaban a '-45' silenciosamente.
+    Debe detectarse y reconstruirse correctamente."""
+    csv_data = "Fecha,Concepto,Importe\n01/01/2026,PAGO SEGURIDAD SOCIAL,-294,00 \u20ac\n02/01/2026,MERCADONA,-45,30\u20ac\n"
+    data = {"file": (io.BytesIO(csv_data.encode("utf-8")), "mov.csv")}
+    r = client.post("/api/movimientos/csv", data=data, content_type="multipart/form-data")
+    assert r.status_code == 201
+    body = r.get_json()
+    importes = sorted(m["importe"] for m in body["movimientos"])
+    assert importes == [45.3, 294.0]
+
+
+def test_subir_csv_delimitador_punto_y_coma(client):
+    csv_data = "fecha;concepto;importe\n01/01/2026;GASTO TEST;-45,30\n"
+    data = {"file": (io.BytesIO(csv_data.encode("utf-8")), "mov.csv")}
+    r = client.post("/api/movimientos/csv", data=data, content_type="multipart/form-data")
+    assert r.status_code == 201
+    body = r.get_json()
+    assert body["movimientos"][0]["importe"] == 45.3
+
+
+def test_subir_csv_vacio_rechazado(client):
+    data = {"file": (io.BytesIO(b""), "vacio.csv")}
+    r = client.post("/api/movimientos/csv", data=data, content_type="multipart/form-data")
+    assert r.status_code == 400
