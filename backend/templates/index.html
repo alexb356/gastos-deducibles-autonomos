@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Detector de gastos deducibles</title>
+<style>
+  body { font-family: sans-serif; max-width: 950px; margin: 30px auto; padding: 0 20px; color: #222; }
+  h1 { color: #1a4d8f; }
+  fieldset { margin-bottom: 25px; padding: 15px; border-radius: 8px; border: 1px solid #ccc; }
+  button { margin-top: 12px; padding: 8px 16px; background: #1a4d8f; color: white; border: none; border-radius: 5px; cursor: pointer; }
+  table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 0.8em; }
+  td, th { border: 1px solid #ddd; padding: 5px; }
+  .si { color: #060; font-weight: bold; }
+  .no { color: #b00; }
+  .parcial { color: #a60; }
+  .revisar { color: #666; font-style: italic; }
+</style>
+</head>
+<body>
+<h1>Detector de gastos deducibles para autónomos</h1>
+<p>Sube tu CSV de movimientos bancarios (columnas: fecha, descripción/concepto, importe). Clasificamos cada gasto y te decimos qué norma lo justifica.</p>
+
+<fieldset>
+  <legend>1. Subir CSV de movimientos</legend>
+  <input type="file" id="csv_file" accept=".csv">
+  <button onclick="subirCSV()">Analizar</button>
+  <div id="csv_msg"></div>
+</fieldset>
+
+<fieldset>
+  <legend>2. Resumen</legend>
+  <div id="resumen"></div>
+  <button onclick="exportar()">Exportar CSV con clasificación</button>
+</fieldset>
+
+<fieldset>
+  <legend>3. Detalle</legend>
+  <table id="tabla"><thead><tr><th>Fecha</th><th>Descripción</th><th>Importe</th><th>Deducible</th><th>%</th><th>Norma</th></tr></thead><tbody></tbody></table>
+</fieldset>
+
+<script>
+let ultimoLote = null;
+
+async function subirCSV() {
+  const input = document.getElementById('csv_file');
+  if (!input.files.length) { alert('Selecciona un archivo CSV'); return; }
+  const fd = new FormData();
+  fd.append('file', input.files[0]);
+  const r = await fetch('/api/movimientos/csv', {method: 'POST', body: fd});
+  const data = await r.json();
+  if (!r.ok) { document.getElementById('csv_msg').textContent = data.error; return; }
+  ultimoLote = data.lote;
+  document.getElementById('csv_msg').textContent = `Procesados ${data.movimientos_procesados} movimientos.`;
+  cargarResumen();
+  cargarTabla();
+}
+
+async function cargarResumen() {
+  const r = await fetch('/api/movimientos/resumen' + (ultimoLote ? '?lote=' + ultimoLote : ''));
+  const data = await r.json();
+  document.getElementById('resumen').innerHTML =
+    `<p>Total gastado: <b>${data.total_gastado} €</b> | Total deducible estimado: <b>${data.total_deducible_estimado} €</b> | Pendientes de revisión manual: <b>${data.pendientes_revision}</b></p>`;
+}
+
+async function cargarTabla() {
+  const r = await fetch('/api/movimientos' + (ultimoLote ? '?lote=' + ultimoLote : ''));
+  const data = await r.json();
+  const claseMap = {True: 'si', False: 'no', parcial: 'parcial', revisar: 'revisar'};
+  document.querySelector('#tabla tbody').innerHTML = data.map(m => `<tr>
+    <td>${m.fecha||''}</td><td>${m.descripcion}</td><td>${m.importe.toFixed(2)} €</td>
+    <td class="${claseMap[m.deducible]||''}">${m.deducible}</td><td>${m.porcentaje_estimado}%</td><td>${m.norma}</td>
+  </tr>`).join('');
+}
+
+function exportar() {
+  window.location = '/api/movimientos/exportar.csv' + (ultimoLote ? '?lote=' + ultimoLote : '');
+}
+</script>
+</body>
+</html>
