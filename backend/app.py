@@ -15,6 +15,7 @@ import os
 import io
 import csv
 import re
+import uuid
 from datetime import datetime, timezone
 
 from flask import Flask, request, jsonify, render_template, Response
@@ -27,8 +28,17 @@ app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("FLASK_SECRET_KEY", "dev-only-not-secure")
 app.config["SQLALCHEMY_DATABASE_URI"] = os.environ.get("DATABASE_URL", "sqlite:///gastos.db")
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024  # 8MB: admite CSV/foto de ticket, mitiga DoS
 
 db = SQLAlchemy(app)
+
+
+@app.after_request
+def _cabeceras_seguridad(resp):
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["X-Frame-Options"] = "DENY"
+    resp.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    return resp
 
 # ---------------------------------------------------------------------------
 # Motor de reglas de deducibilidad (ver NORMATIVA.md)
@@ -135,7 +145,7 @@ def subir_csv():
     if not contenido.strip():
         return jsonify({"error": "el CSV está vacío"}), 400
 
-    lote = datetime.now(timezone.utc).strftime("lote-%Y%m%d%H%M%S")
+    lote = datetime.now(timezone.utc).strftime("lote-%Y%m%d%H%M%S-") + uuid.uuid4().hex[:12]
     delimitador = _detectar_delimitador(contenido[:4096])
     reader = csv.DictReader(io.StringIO(contenido), delimiter=delimitador)
     campos = {c.lower().strip(): c for c in (reader.fieldnames or [])}
@@ -187,19 +197,18 @@ def subir_csv():
 @app.route("/api/movimientos", methods=["GET"])
 def listar_movimientos():
     lote = request.args.get("lote")
-    q = Movimiento.query
-    if lote:
-        q = q.filter_by(lote=lote)
+    if not lote:
+        return jsonify({"error": "falta el parámetro 'lote' (no se listan movimientos de otros usuarios sin especificarlo)"}), 400
+    q = Movimiento.query.filter_by(lote=lote)
     return jsonify([m.to_dict() for m in q.order_by(Movimiento.id.desc()).all()])
 
 
 @app.route("/api/movimientos/resumen")
 def resumen():
     lote = request.args.get("lote")
-    q = Movimiento.query
-    if lote:
-        q = q.filter_by(lote=lote)
-    movimientos = q.all()
+    if not lote:
+        return jsonify({"error": "falta el parámetro 'lote' (no se agregan movimientos de otros usuarios sin especificarlo)"}), 400
+    movimientos = Movimiento.query.filter_by(lote=lote).all()
     total_gastado = sum(m.importe for m in movimientos)
     total_deducible_estimado = 0.0
     for m in movimientos:
@@ -215,18 +224,31 @@ def resumen():
     })
 
 
+def _sanitizar_celda_csv(valor):
+    """Mitiga CSV/Formula Injection (CWE-1236): si el valor empieza por un
+    carácter que Excel/Sheets interpretaría como inicio de fórmula, se le
+    antepone un apóstrofo para forzar texto plano."""
+    s = "" if valor is None else str(valor)
+    if s and s[0] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + s
+    return s
+
+
 @app.route("/api/movimientos/exportar.csv")
 def exportar_csv():
     lote = request.args.get("lote")
-    q = Movimiento.query
-    if lote:
-        q = q.filter_by(lote=lote)
-    movimientos = q.order_by(Movimiento.id.asc()).all()
+    if not lote:
+        return jsonify({"error": "falta el parámetro 'lote' (no se exportan movimientos de otros usuarios sin especificarlo)"}), 400
+    movimientos = Movimiento.query.filter_by(lote=lote).order_by(Movimiento.id.asc()).all()
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(["fecha", "descripcion", "importe", "deducible", "porcentaje_estimado", "norma"])
     for m in movimientos:
-        writer.writerow([m.fecha, m.descripcion, m.importe, m.deducible, m.porcentaje_estimado, m.norma])
+        writer.writerow([
+            _sanitizar_celda_csv(m.fecha), _sanitizar_celda_csv(m.descripcion),
+            m.importe, _sanitizar_celda_csv(m.deducible), m.porcentaje_estimado,
+            _sanitizar_celda_csv(m.norma),
+        ])
     return Response(buf.getvalue(), mimetype="text/csv",
                      headers={"Content-Disposition": "attachment; filename=resumen_gastos_deducibles.csv"})
 
@@ -249,6 +271,16 @@ def ocr_ticket():
     f = request.files["file"]
     try:
         img = Image.open(f.stream)
+        img.verify()  # detecta imágenes truncadas/corruptas antes de decodificar
+        f.stream.seek(0)
+        img = Image.open(f.stream)
+        # Mitiga "decompression bombs" (imágenes con dimensiones declaradas
+        # absurdamente grandes que agotan memoria al decodificar). Pillow ya
+        # avisa por defecto sobre Image.MAX_IMAGE_PIXELS; aquí lo forzamos
+        # explícitamente con un límite razonable para una foto de ticket.
+        ancho, alto = img.size
+        if ancho * alto > 40_000_000:  # ~40 megapíxeles, muy por encima de una foto de móvil normal
+            return jsonify({"error": "imagen demasiado grande para procesar"}), 413
         texto = pytesseract.image_to_string(img, lang="spa+eng")
     except Exception as exc:
         return jsonify({"error": f"No se pudo procesar la imagen. ¿Tesseract OCR está instalado? Detalle: {exc}"}), 502
@@ -286,4 +318,4 @@ def crear_tablas():
 
 if __name__ == "__main__":
     crear_tablas()
-    app.run(debug=True, port=5003)
+    app.run(debug=os.environ.get("FLASK_DEBUG", "0") == "1", port=5003)

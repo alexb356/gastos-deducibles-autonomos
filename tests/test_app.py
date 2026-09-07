@@ -76,21 +76,77 @@ def test_subir_csv_sin_archivo(client):
 
 def test_resumen_calcula_totales(client):
     data = {"file": (io.BytesIO(CSV_EJEMPLO.encode("utf-8")), "movimientos.csv")}
-    client.post("/api/movimientos/csv", data=data, content_type="multipart/form-data")
-    r = client.get("/api/movimientos/resumen")
+    subida = client.post("/api/movimientos/csv", data=data, content_type="multipart/form-data").get_json()
+    r = client.get("/api/movimientos/resumen?lote=" + subida["lote"])
     assert r.status_code == 200
     body = r.get_json()
     assert body["total_movimientos"] == 5
     assert body["total_deducible_estimado"] > 0
 
 
-def test_exportar_csv(client):
+def test_resumen_sin_lote_rechazado(client):
+    """Regresión de seguridad: sin 'lote' no debe poder agregarse el histórico
+    financiero de todos los usuarios del SaaS (fuga de datos entre tenants)."""
     data = {"file": (io.BytesIO(CSV_EJEMPLO.encode("utf-8")), "movimientos.csv")}
     client.post("/api/movimientos/csv", data=data, content_type="multipart/form-data")
-    r = client.get("/api/movimientos/exportar.csv")
+    r = client.get("/api/movimientos/resumen")
+    assert r.status_code == 400
+
+
+def test_listar_movimientos_sin_lote_rechazado(client):
+    data = {"file": (io.BytesIO(CSV_EJEMPLO.encode("utf-8")), "movimientos.csv")}
+    client.post("/api/movimientos/csv", data=data, content_type="multipart/form-data")
+    r = client.get("/api/movimientos")
+    assert r.status_code == 400
+
+
+def test_lote_de_un_usuario_no_ve_movimientos_de_otro(client):
+    """Regresión de seguridad: dos subidas (simulando dos usuarios distintos)
+    deben quedar completamente aisladas por lote."""
+    data1 = {"file": (io.BytesIO(CSV_EJEMPLO.encode("utf-8")), "a.csv")}
+    lote1 = client.post("/api/movimientos/csv", data=data1, content_type="multipart/form-data").get_json()["lote"]
+
+    csv_otro = "fecha,concepto,importe\n01/01/2026,ALQUILER OFICINA PRIVADO,-800.00\n"
+    data2 = {"file": (io.BytesIO(csv_otro.encode("utf-8")), "b.csv")}
+    lote2 = client.post("/api/movimientos/csv", data=data2, content_type="multipart/form-data").get_json()["lote"]
+
+    r1 = client.get("/api/movimientos?lote=" + lote1).get_json()
+    r2 = client.get("/api/movimientos?lote=" + lote2).get_json()
+    assert all(m["lote"] == lote1 for m in r1)
+    assert all(m["lote"] == lote2 for m in r2)
+    assert not any("ALQUILER OFICINA PRIVADO" in m["descripcion"] for m in r1)
+
+
+def test_exportar_csv(client):
+    data = {"file": (io.BytesIO(CSV_EJEMPLO.encode("utf-8")), "movimientos.csv")}
+    subida = client.post("/api/movimientos/csv", data=data, content_type="multipart/form-data").get_json()
+    r = client.get("/api/movimientos/exportar.csv?lote=" + subida["lote"])
     assert r.status_code == 200
     assert r.mimetype == "text/csv"
     assert "descripcion" in r.get_data(as_text=True)
+
+
+def test_exportar_csv_sin_lote_rechazado(client):
+    data = {"file": (io.BytesIO(CSV_EJEMPLO.encode("utf-8")), "movimientos.csv")}
+    client.post("/api/movimientos/csv", data=data, content_type="multipart/form-data")
+    r = client.get("/api/movimientos/exportar.csv")
+    assert r.status_code == 400
+
+
+def test_exportar_csv_sanitiza_formula_injection(client):
+    """Regresión de seguridad (CSV/Formula Injection CWE-1236): una descripción
+    de movimiento bancario que empiece por '=', '+', '-' o '@' se interpretaría
+    como fórmula en Excel/Sheets al abrir el CSV exportado. Debe neutralizarse."""
+    csv_malicioso = 'fecha,concepto,importe\n01/01/2026,"=cmd|''/c calc''!A1",-50.00\n'
+    data = {"file": (io.BytesIO(csv_malicioso.encode("utf-8")), "malicioso.csv")}
+    subida = client.post("/api/movimientos/csv", data=data, content_type="multipart/form-data").get_json()
+    r = client.get("/api/movimientos/exportar.csv?lote=" + subida["lote"])
+    contenido = r.get_data(as_text=True)
+    assert "'=cmd" in contenido or "'=CMD" in contenido.upper()
+    # Nunca debe aparecer una celda que empiece literalmente por '=' sin el apóstrofo protector
+    for linea in contenido.splitlines()[1:]:
+        primera_celda = linea.split(",")[0] if linea else ""
+        assert not primera_celda.startswith("=")
 
 
 def test_ocr_endpoint_sin_dependencias_o_binario_responde_error_controlado(client):
